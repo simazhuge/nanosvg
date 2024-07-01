@@ -166,6 +166,23 @@ typedef struct NSVGimage
 	NSVGshape* shapes;			// Linked list of shapes in the image.
 } NSVGimage;
 
+typedef struct NPColor
+{
+    int id;
+    int color;
+    struct NPColor* next;
+
+} NPColor;
+//颜色组
+typedef struct NPColors
+{
+    int id;
+    char desc[64];
+    struct NPColors* next;
+    struct NPColor* color;
+} NPColors;
+
+
 // Parses SVG file from a file, returns SVG image as paths.
 NSVGimage* nsvgParseFromFile(const char* filename, const char* units, float dpi);
 
@@ -455,6 +472,7 @@ typedef struct NSVGparser
 	float dpi;
 	char pathFlag;
 	char defsFlag;
+    NPColors* pColorsList;
 } NSVGparser;
 
 static void nsvg__xformIdentity(float* t)
@@ -680,11 +698,31 @@ static void nsvg__deleteGradientData(NSVGgradientData* grad)
 	}
 }
 
+static void nsvg__deletePColors(NPColors* p)
+{
+    NPColors* next;
+    NPColor *nextCl, *cl;
+    while (p != NULL)
+    {
+        next = p->next;
+        cl = p->color;
+        while(cl)
+        {
+            nextCl = cl->next;
+            free(cl);
+            cl = nextCl;
+        }
+        free(p);
+        p = next;
+    }
+}
+
 static void nsvg__deleteParser(NSVGparser* p)
 {
 	if (p != NULL) {
 		nsvg__deletePaths(p->plist);
 		nsvg__deleteGradientData(p->gradients);
+        nsvg__deletePColors(p->pColorsList);
 		nsvgDelete(p->image);
 		free(p->pts);
 		free(p);
@@ -993,7 +1031,7 @@ static void nsvg__addShape(NSVGparser* p)
 		shape->fill.type = NSVG_PAINT_NONE;
 	} else if (attr->hasFill == 1) {
 		shape->fill.type = NSVG_PAINT_COLOR;
-		shape->fill.color = attr->fillColor;
+        shape->fill.color = attr->fillColor;
 		shape->fill.color |= (unsigned int)(attr->fillOpacity*255) << 24;
 	} else if (attr->hasFill == 2) {
 		shape->fill.type = NSVG_PAINT_UNDEF;
@@ -2581,6 +2619,81 @@ static void nsvg__parsePoly(NSVGparser* p, const char** attr, int closeFlag)
 	nsvg__addShape(p);
 }
 
+// static void nsvg__addColors
+static void nsvg__parsePColor(NSVGparser* p, const char** attr)
+{
+    int i;
+    NPColor *color = NULL;
+    color = (NPColor*)malloc(sizeof(NPColor));
+    if (color == NULL) goto error;
+    memset(color, 0, sizeof(NPColor));
+    char id[64];
+    for (i = 0; attr[i]; i += 2) {
+       if((strcmp(attr[i], "id") == 0))
+        {
+            memset(id, 0, sizeof(id));
+            strncpy(id, attr[i+1], 63);
+            id[63] = '\0';
+            color->id = atoi(id);
+        }
+    }
+    color->next = p->pColorsList->color;
+    p->pColorsList->color = color;
+    return;
+error:
+    if (color != NULL) {
+        NPColor *cl = NULL;
+        NPColor *snext;
+        cl = cl->next;
+        while(cl != NULL)
+        {
+            snext = cl->next;
+            free(cl);
+            cl = snext;
+        }
+        free(color);
+    }
+}
+
+
+static void nsvg__parsePColors(NSVGparser* p, const char** attr)
+{
+    int i;
+    const char* s;
+    NPColors *colors = NULL;
+    colors = (NPColors*)malloc(sizeof(NPColors));
+    if (colors == NULL) goto error;
+    memset(colors, 0, sizeof(NPColors));
+    char id[64];
+    for (i = 0; attr[i]; i += 2) {
+        if (strcmp(attr[i], "desc") == 0) {
+            s = attr[i + 1];
+            memcpy(colors->desc, s, sizeof colors->desc);
+        }
+        else if((strcmp(attr[i], "id") == 0))
+        {
+            memset(id, 0, sizeof(id));
+            strncpy(id, attr[i+1], 63);
+            id[63] = '\0';
+            colors->id = atoi(id);
+        }
+    }
+    colors->next = p->pColorsList;
+    p->pColorsList = colors;
+    return;
+error:
+    if (colors != NULL) {
+        NPColors *color, *snext;
+        color = colors->next;
+        while(color != NULL)
+        {
+            snext = color->next;
+            free(color);
+            color = snext;
+        }
+        free(colors);
+    }
+}
 static void nsvg__parseSVG(NSVGparser* p, const char** attr)
 {
 	int i;
@@ -2754,60 +2867,124 @@ static void nsvg__startElement(void* ud, const char* el, const char** attr)
 
 	if (p->defsFlag) {
 		// Skip everything but gradients in defs
-		if (strcmp(el, "linearGradient") == 0) {
+        if (strcmp(el, "linearGradient") == 0) {
 			nsvg__parseGradient(p, attr, NSVG_PAINT_LINEAR_GRADIENT);
-		} else if (strcmp(el, "radialGradient") == 0) {
+        } else if (strcmp(el, "radialGradient") == 0) {
 			nsvg__parseGradient(p, attr, NSVG_PAINT_RADIAL_GRADIENT);
-		} else if (strcmp(el, "stop") == 0) {
+        } else if (strcmp(el, "stop") == 0) {
 			nsvg__parseGradientStop(p, attr);
 		}
 		return;
 	}
 
-	if (strcmp(el, "g") == 0) {
-		nsvg__pushAttr(p);
-		nsvg__parseAttribs(p, attr);
-	} else if (strcmp(el, "path") == 0) {
-		if (p->pathFlag)	// Do not allow nested paths.
-			return;
-		nsvg__pushAttr(p);
-		nsvg__parsePath(p, attr);
-		nsvg__popAttr(p);
-	} else if (strcmp(el, "rect") == 0) {
-		nsvg__pushAttr(p);
-		nsvg__parseRect(p, attr);
-		nsvg__popAttr(p);
-	} else if (strcmp(el, "circle") == 0) {
-		nsvg__pushAttr(p);
-		nsvg__parseCircle(p, attr);
-		nsvg__popAttr(p);
-	} else if (strcmp(el, "ellipse") == 0) {
-		nsvg__pushAttr(p);
-		nsvg__parseEllipse(p, attr);
-		nsvg__popAttr(p);
-	} else if (strcmp(el, "line") == 0)  {
-		nsvg__pushAttr(p);
-		nsvg__parseLine(p, attr);
-		nsvg__popAttr(p);
-	} else if (strcmp(el, "polyline") == 0)  {
-		nsvg__pushAttr(p);
-		nsvg__parsePoly(p, attr, 0);
-		nsvg__popAttr(p);
-	} else if (strcmp(el, "polygon") == 0)  {
-		nsvg__pushAttr(p);
-		nsvg__parsePoly(p, attr, 1);
-		nsvg__popAttr(p);
-	} else  if (strcmp(el, "linearGradient") == 0) {
-		nsvg__parseGradient(p, attr, NSVG_PAINT_LINEAR_GRADIENT);
-	} else if (strcmp(el, "radialGradient") == 0) {
-		nsvg__parseGradient(p, attr, NSVG_PAINT_RADIAL_GRADIENT);
-	} else if (strcmp(el, "stop") == 0) {
-		nsvg__parseGradientStop(p, attr);
-	} else if (strcmp(el, "defs") == 0) {
-		p->defsFlag = 1;
-	} else if (strcmp(el, "svg") == 0) {
-		nsvg__parseSVG(p, attr);
-	}
+    char tmp = *el;
+    const char *tmpEl = (++el);
+    switch (tmp) {
+    case 'g':
+    {
+        nsvg__pushAttr(p);
+        nsvg__parseAttribs(p, attr);
+    }
+        break;
+    case 'p':
+    {
+        if (strcmp(tmpEl, "ath") == 0) {
+            if (p->pathFlag)	// Do not allow nested paths.
+                return;
+            nsvg__pushAttr(p);
+            nsvg__parsePath(p, attr);
+            nsvg__popAttr(p);
+        }
+        else if (strcmp(tmpEl, "olyline") == 0)  {
+            nsvg__pushAttr(p);
+            nsvg__parsePoly(p, attr, 0);
+            nsvg__popAttr(p);
+        }
+        else if (strcmp(tmpEl, "olygon") == 0)  {
+            nsvg__pushAttr(p);
+            nsvg__parsePoly(p, attr, 1);
+            nsvg__popAttr(p);
+        }
+        else if(strcmp(tmpEl, "Colors") == 0)
+        {
+            nsvg__pushAttr(p);
+            nsvg__parsePColors(p, attr);
+            nsvg__popAttr(p);
+
+        }
+        else if(strcmp(tmpEl, "Color") == 0)
+        {
+            nsvg__pushAttr(p);
+            nsvg__parsePColor(p, attr);
+            nsvg__popAttr(p);
+
+        }
+
+    }
+        break;
+    case 'r':
+    {
+        if (strcmp(tmpEl, "ect") == 0) {
+            nsvg__pushAttr(p);
+            nsvg__parseRect(p, attr);
+            nsvg__popAttr(p);
+        }
+        else if (strcmp(tmpEl, "adialGradient") == 0) {
+            nsvg__parseGradient(p, attr, NSVG_PAINT_RADIAL_GRADIENT);
+        }
+    }
+
+        break;
+    case 'c':
+    {
+        if (strcmp(tmpEl, "ircle") == 0) {
+            nsvg__pushAttr(p);
+            nsvg__parseCircle(p, attr);
+            nsvg__popAttr(p);
+        }
+    }
+
+        break;
+    case 'e':
+    {
+        if (strcmp(tmpEl, "llipse") == 0) {
+            nsvg__pushAttr(p);
+            nsvg__parseEllipse(p, attr);
+            nsvg__popAttr(p);
+        }
+    }
+
+        break;
+    case 'l':
+    {
+        if (strcmp(tmpEl, "line") == 0)  {
+            nsvg__pushAttr(p);
+            nsvg__parseLine(p, attr);
+            nsvg__popAttr(p);
+        }
+        else  if (strcmp(tmpEl, "inearGradient") == 0) {
+            nsvg__parseGradient(p, attr, NSVG_PAINT_LINEAR_GRADIENT);
+        }
+    }
+    break;
+    case 's':
+        if (strcmp(tmpEl, "top") == 0) {
+            nsvg__parseGradientStop(p, attr);
+        }
+        else if (strcmp(tmpEl, "vg") == 0) {
+            nsvg__parseSVG(p, attr);
+        }
+        break;
+    case 'd':
+
+        if (strcmp(tmpEl, "efs") == 0) {
+            p->defsFlag = 1;
+        }
+        break;
+    default:
+        break;
+    }
+
 }
 
 static void nsvg__endElement(void* ud, const char* el)
